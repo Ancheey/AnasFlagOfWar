@@ -1,0 +1,13 @@
+{
+    "type": "code",
+    "modid": "anasflagofwar",
+    "name": "Ana's Flag Of War",
+    "authors": [
+        "Anastasia 'Aspiracja'"
+    ],
+    "description": "Hold your flag of war up or challenge someone to a duel",
+    "version": "1.0.0",
+    "dependencies": {
+        "game": "1.19.7"
+    }
+}
