@@ -6,8 +6,8 @@
         "Anastasia 'Aspiracja'"
     ],
     "description": "Hold your flag of war up or challenge someone to a duel",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "dependencies": {
-        "game": "1.19.7"
+        "game": "1.21.0"
     }
 }

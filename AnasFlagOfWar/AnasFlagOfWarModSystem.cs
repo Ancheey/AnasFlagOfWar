@@ -1,6 +1,9 @@
-﻿using System.Linq;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection.Metadata;
 using System.Text;
+using System.Threading;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -16,8 +19,20 @@ namespace AnasFlagOfWar
     {
         public static bool EnableSystem = true;
         public static bool PbPvp = true;
+        public static PvpConfig Config;
+        private void LoadConfig(ICoreServerAPI api)
+        {
+            Config = api.LoadModConfig<PvpConfig>("AnasPvpConfig");
+            if (Config == null)
+            {
+                api.StoreModConfig(new PvpConfig(), "AnasPvpConfig");
+                Config = new();
+            }
+        }
         public override void StartServerSide(ICoreServerAPI api)
         {
+            LoadConfig(api);
+
 
             api.RegisterEntityBehaviorClass("EntityBehaviorPvp", typeof(EntityBehaviorPvp));
             var pvp = api.ChatCommands
@@ -49,16 +64,40 @@ namespace AnasFlagOfWar
                 var pvp = args.Caller.Player.Entity.GetBehavior<EntityBehaviorPvp>();
                 if (pvp.FlagOfWar)
                     return TextCommandResult.Success("Your flag of war is already up!");
+
+                if (FlagTimeouts.ContainsKey(args.Caller.Player))
+                    FlagTimeouts[args.Caller.Player] = DateTime.Now.AddSeconds(90);
+                else
+                    FlagTimeouts.Add(args.Caller.Player, DateTime.Now.AddSeconds(90));
+
+
                 pvp.FlagOfWar = true;
-                return TextCommandResult.Success("You have been flaged for war!");
+                return TextCommandResult.Success("You have been flagged for war!");
             });
             pvp.BeginSubCommand("off").IgnoreAdditionalArgs().WithDescription("Lowers your Flag of War").HandleWith((args) =>
             {
                 var pvp = args.Caller.Player.Entity.GetBehavior<EntityBehaviorPvp>();
                 if (!pvp.FlagOfWar)
                     return TextCommandResult.Success("Your flag of war is already lowered. Can't get more cowardly than that!");
+
+                if (FlagTimeouts.TryGetValue(args.Caller.Player, out DateTime cooldown))
+                {
+                    if(cooldown > DateTime.Now)
+                        return TextCommandResult.Success($"Your cannot lower your flag for another {(cooldown - DateTime.Now).TotalSeconds}s");
+                    else
+                        FlagTimeouts.Remove(args.Caller.Player);
+                }
+                    
                 pvp.FlagOfWar = false;
                 return TextCommandResult.Success("You have lowered the flag of war");
+            });
+            pvp.BeginSubCommand("reload").IgnoreAdditionalArgs().WithDescription("Reloads the config file").RequiresPrivilege(Privilege.controlserver).HandleWith((args) =>
+            {
+                var pvp = args.Caller.Player.Entity.GetBehavior<EntityBehaviorPvp>();
+                if (pvp.FlagOfWar)
+                    return TextCommandResult.Success("Your flag of war is already up!");
+                pvp.FlagOfWar = true;
+                return TextCommandResult.Success("You have been flaged for war!");
             });
             pvp.BeginSubCommand("battle").WithArgs(api.ChatCommands.Parsers.Word("password"))
                 .WithDescription("Enables pvp with people who have joined the same battle")
@@ -69,8 +108,12 @@ namespace AnasFlagOfWar
                 string password = args.Parsers[0].GetValue().ToString();
                 var pvp = args.Caller.Player.Entity.GetBehavior<EntityBehaviorPvp>();
                 pvp.BattleCode = password;
-                var players = api.World.AllOnlinePlayers.Count(p => p.Entity.GetBehavior<EntityBehaviorPvp>().BattleCode == password);
-                return TextCommandResult.Success($"You've joined a battle with {players-1} other {(players-1==1?"person":"people")}");
+                var playersinBattle = api.World.AllOnlinePlayers.Where(p => p.Entity.GetBehavior<EntityBehaviorPvp>().BattleCode == password);
+                foreach( var player in playersinBattle )
+                    api.SendMessage(player, GlobalConstants.CurrentChatGroup, $"{args.Caller.GetName()} has joined the battle", EnumChatType.OwnMessage);
+
+                var count = playersinBattle.Count();
+                return TextCommandResult.Success($"You've joined a battle with {count - 1} other {(count - 1==1?"person":"people")}");
             });
             pvp.BeginSubCommand("duel").WithArgs(api.ChatCommands.Parsers.OnlinePlayer("player"))
                 .WithDescription("Sends a challenge to a designated player or accepts it if challenged")
@@ -97,7 +140,7 @@ namespace AnasFlagOfWar
                 {
                     pvp.DueledEntityPlayer = challenger;
                     api.SendMessage(challenger, GlobalConstants.CurrentChatGroup, $"{args.Caller.Player.PlayerName} has accepted your challenge", EnumChatType.OwnMessage);
-                    return TextCommandResult.Success($"Issued a challenge to {challenger.PlayerName}");
+                    return TextCommandResult.Success($"Accepted {challenger.PlayerName}(s) challenge");
                 }
                 else if(challenger == args.Caller.Player)
                 {
@@ -134,6 +177,10 @@ namespace AnasFlagOfWar
             });
             base.StartServerSide(api);
         }
+
+        private readonly Dictionary<IPlayer, DateTime> FlagTimeouts = new();
+
+
     }
     public class EntityBehaviorPvp : EntityBehavior
     {
@@ -230,18 +277,30 @@ namespace AnasFlagOfWar
             }
         }
 
-        public void MarkDirty() => entity.WatchedAttributes.MarkPathDirty(PVPFLAGTREE_ATTRIBUTE_TREE_NAME);
+        public bool IsDueling { get 
+            {
+                if (DueledEntityUID == "")
+                    return false;
+                var enemy = entity.World.PlayerByUid(DueledEntityUID).Entity;
+                if (enemy == null)
+                    return false;
+                return enemy.GetBehavior<EntityBehaviorPvp>().DueledEntityPlayer.Entity == entity;
+            }}
+        public bool HasPvPOn => FlagOfWar;
+        public bool IsInBattle => BattleCode != "";
+
 
         public override string PropertyName() => "PVPFlag";
         public override void Initialize(EntityProperties properties, JsonObject attributes)
         {
             if (entity.WatchedAttributes.GetTreeAttribute(PVPFLAGTREE_ATTRIBUTE_TREE_NAME) == null)
                 entity.WatchedAttributes.SetAttribute(PVPFLAGTREE_ATTRIBUTE_TREE_NAME, new TreeAttribute());
-            MarkDirty();
         }
         public override void OnEntityDeath(DamageSource damageSourceForDeath)
         {
-            DueledEntityUID = "";
+            if(AnasFlagOfWarModSystem.Config.DisablePvPOnDeath)
+                DueledEntityUID = "";
+
             base.OnEntityDeath(damageSourceForDeath);
         }
 
@@ -292,5 +351,11 @@ namespace AnasFlagOfWar
             }
 
         }
+    }
+    public enum PvpModes
+    {
+        Duel,
+        Battle,
+        Flag
     }
 }
